@@ -34,6 +34,37 @@ app.get("/api/healthz", (_req, res) => {
   res.json({ status: "ok" });
 });
 
+// Simple GET — pass your message as ?q=
+// curl "https://your-project.vercel.app/api/ask?q=hello how are you"
+app.get("/api/ask", async (req, res) => {
+  const q = req.query.q;
+  if (!q || typeof q !== "string") {
+    return res.status(400).json({ error: "Missing ?q= parameter. Example: /api/ask?q=hello" });
+  }
+
+  try {
+    const client = getClient();
+    const completion = await client.chat.completions.create({
+      model: req.query.model || "google/gemini-2.5-flash",
+      messages: [{ role: "user", content: q }],
+      max_tokens: 8192,
+    });
+    const content = completion.choices[0]?.message?.content ?? "";
+    const usage = completion.usage;
+    res.json({
+      content,
+      model: completion.model,
+      usage: {
+        prompt_tokens: usage?.prompt_tokens ?? 0,
+        completion_tokens: usage?.completion_tokens ?? 0,
+        total_tokens: usage?.total_tokens ?? 0,
+      },
+    });
+  } catch (err) {
+    res.status(502).json({ error: "OpenRouter request failed", message: err.message });
+  }
+});
+
 // List all OpenRouter models
 app.get("/api/models", async (_req, res) => {
   try {
@@ -46,7 +77,7 @@ app.get("/api/models", async (_req, res) => {
   }
 });
 
-// Non-streaming chat
+// Non-streaming chat (POST with full control)
 app.post("/api/chat", async (req, res) => {
   const parsed = ChatSchema.safeParse(req.body);
   if (!parsed.success) {
