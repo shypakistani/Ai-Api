@@ -1,0 +1,11 @@
+{
+  "name": "openrouter-api",
+  "version": "1.0.0",
+  "type": "module",
+  "dependencies": {
+    "cors": "^2.8.6",
+    "express": "^4.21.2",
+    "openai": "^4.104.0",
+    "zod": "^3.25.76"
+  }
+}
