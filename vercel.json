@@ -1,13 +1,8 @@
 {
-  "functions": {
-    "chat.py": {
-      "runtime": "python3.12"
-    }
-  },
-  "routes": [
+  "rewrites": [
     {
-      "src": "/(.*)",
-      "dest": "/chat.py"
+      "source": "/(.*)",
+      "destination": "/chat.py"
     }
   ]
 }
