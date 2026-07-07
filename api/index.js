@@ -13,11 +13,11 @@ function getClient() {
     throw new Error("OPENROUTER_API_KEY is not set");
   }
   return new OpenAI({
-    // FIXED: Restored /api/v1 so OpenRouter accepts OpenAI SDK routing structures
-    baseURL: "baseURL: "https://openrouter.ai/api/v1",
+    // FIXED: Cleaned up the broken string syntax and duplicate token duplication
+    baseURL: "https://openrouter.ai/api/v1",
     apiKey: process.env.OPENROUTER_API_KEY,
     defaultHeaders: {
-      "HTTP-Referer": "https://localhost:3000", 
+      "HTTP-Referer": "https://localhost:3000",
       "X-Title": "Guaranteed Free Router App",
       // CRITICAL FOR SPEED: Lowers generation latency drastically
       "openrouter/provider-routing": "nitro"
@@ -34,7 +34,7 @@ const MessageSchema = z.object({
 const ChatSchema = z.object({
   messages: z.array(MessageSchema).min(1),
   // Hardcoded literal: This endpoint rejects any incoming request trying to specify a paid model
-  model: z.literal("openrouter/free").default("openrouter/free"), 
+  model: z.literal("openrouter/free").default("openrouter/free"),
   max_tokens: z.number().int().positive().max(4096).default(4096),
   temperature: z.number().min(0).max(2).default(1),
 });
@@ -50,20 +50,18 @@ app.get("/api/ask", async (req, res) => {
   if (!q || typeof q !== "string") {
     return res.status(400).json({ error: "Missing ?q= parameter." });
   }
-
   try {
     const client = getClient();
-
     // FORCE FREE MODEL: Completely ignored req.query.model to prevent unintended paid calls
     const completion = await client.chat.completions.create({
-      model: "openrouter/free", 
+      model: "openrouter/free",
       messages: [{ role: "user", content: q }],
       max_tokens: 4096,
     });
-
-    const content = completion.choices?.[0]?.message?.content ?? ""; // FIXED: Added missing safely-chained array index [0]
+    
+    const content = completion.choices?.[0]?.message?.content ?? "";
     const usage = completion.usage;
-
+    
     res.json({
       content,
       model: completion.model, // Confirms the exact free fallback engine chosen
@@ -81,13 +79,13 @@ app.get("/api/ask", async (req, res) => {
 // List all OpenRouter models
 app.get("/api/models", async (_req, res) => {
   try {
-    // FIXED: Restored the complete API path for models endpoint parsing
     const response = await fetch("https://openrouter.ai/api/v1/models", {
       headers: { Authorization: `Bearer ${process.env.OPENROUTER_API_KEY}` },
     });
     res.json(await response.json());
   } catch (err) {
-    res.status(502).json({ error: err.message });
+    // FIXED: Handled arbitrary error safely instead of calling .message on unknown type
+    res.status(502).json({ error: err instanceof Error ? err.message : String(err) });
   }
 });
 
@@ -97,9 +95,7 @@ app.post("/api/chat", async (req, res) => {
   if (!parsed.success) {
     return res.status(400).json({ error: "Invalid request. Only 'openrouter/free' is permitted.", details: parsed.error.flatten() });
   }
-
   const { messages, model, max_tokens, temperature } = parsed.data;
-
   try {
     const client = getClient();
     const completion = await client.chat.completions.create({
@@ -108,10 +104,10 @@ app.post("/api/chat", async (req, res) => {
       max_tokens,
       temperature,
     });
-
-    const content = completion.choices?.[0]?.message?.content ?? ""; // FIXED: Added missing safely-chained array index [0]
+    
+    const content = completion.choices?.[0]?.message?.content ?? "";
     const usage = completion.usage;
-
+    
     res.json({
       content,
       model: completion.model,
@@ -132,15 +128,14 @@ app.post("/api/chat/stream", async (req, res) => {
   if (!parsed.success) {
     return res.status(400).json({ error: "Invalid request. Only 'openrouter/free' is permitted.", details: parsed.error.flatten() });
   }
-
   const { messages, model, max_tokens, temperature } = parsed.data;
-
+  
   res.setHeader("Content-Type", "text/event-stream");
   res.setHeader("Cache-Control", "no-cache");
   res.setHeader("Connection", "keep-alive");
   res.setHeader("X-Accel-Buffering", "no");
   res.flushHeaders();
-
+  
   try {
     const client = getClient();
     const stream = await client.chat.completions.create({
@@ -150,16 +145,17 @@ app.post("/api/chat/stream", async (req, res) => {
       temperature,
       stream: true,
     });
-
+    
     for await (const chunk of stream) {
-      const content = chunk.choices?.[0]?.delta?.content; // FIXED: Added missing safely-chained array index [0]
+      const content = chunk.choices?.[0]?.delta?.content;
       if (content) res.write(`data: ${JSON.stringify({ content })}\n\n`);
     }
-
     res.write(`data: ${JSON.stringify({ done: true })}\n\n`);
     res.end();
   } catch (err) {
-    res.write(`data: ${JSON.stringify({ error: err.message })}\n\n`);
+    // FIXED: Safeguarded err.message evaluation against type 'unknown'
+    const errMsg = err instanceof Error ? err.message : String(err);
+    res.write(`data: ${JSON.stringify({ error: errMsg })}\n\n`);
     res.end();
   }
 });
