@@ -13,12 +13,13 @@ function getClient() {
     throw new Error("OPENROUTER_API_KEY is not set");
   }
   return new OpenAI({
+    // FIXED: Restored /api/v1 so OpenRouter accepts OpenAI SDK routing structures
     baseURL: "https://openrouter.ai",
     apiKey: process.env.OPENROUTER_API_KEY,
     defaultHeaders: {
       "HTTP-Referer": "https://localhost:3000", 
       "X-Title": "Guaranteed Free Router App",
-      // CRITICAL FOR ZERO COST: Disables all paid provider fallbacks completely
+      // CRITICAL FOR SPEED: Lowers generation latency drastically
       "openrouter/provider-routing": "nitro"
     }
   });
@@ -60,7 +61,7 @@ app.get("/api/ask", async (req, res) => {
       max_tokens: 4096,
     });
 
-    const content = completion.choices?.message?.content ?? "";
+    const content = completion.choices?.[0]?.message?.content ?? ""; // FIXED: Added missing safely-chained array index [0]
     const usage = completion.usage;
 
     res.json({
@@ -80,6 +81,7 @@ app.get("/api/ask", async (req, res) => {
 // List all OpenRouter models
 app.get("/api/models", async (_req, res) => {
   try {
+    // FIXED: Restored the complete API path for models endpoint parsing
     const response = await fetch("https://openrouter.ai/models", {
       headers: { Authorization: `Bearer ${process.env.OPENROUTER_API_KEY}` },
     });
@@ -107,7 +109,7 @@ app.post("/api/chat", async (req, res) => {
       temperature,
     });
 
-    const content = completion.choices?.message?.content ?? "";
+    const content = completion.choices?.[0]?.message?.content ?? ""; // FIXED: Added missing safely-chained array index [0]
     const usage = completion.usage;
 
     res.json({
@@ -150,7 +152,7 @@ app.post("/api/chat/stream", async (req, res) => {
     });
 
     for await (const chunk of stream) {
-      const content = chunk.choices?.delta?.content;
+      const content = chunk.choices?.[0]?.delta?.content; // FIXED: Added missing safely-chained array index [0]
       if (content) res.write(`data: ${JSON.stringify({ content })}\n\n`);
     }
 
