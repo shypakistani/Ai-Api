@@ -1,4 +1,4 @@
-# Ai-Api
+# AI API FOR PROJECTS
 
 A serverless-ready Python API platform tailored for rapid deployment on Vercel to power AI-driven chat interactions. The repository provides a lightweight, modular foundation featuring custom routing logic, optimized serverless configuration, and minimal dependencies to facilitate clean backend integration for modern AI applications.
 
