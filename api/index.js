@@ -7,25 +7,26 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// Initialize OpenAI client with structural guarantees
+const FREE_MODEL = "openrouter/free";
+
 function getClient() {
   if (!process.env.OPENROUTER_API_KEY) {
-    throw new Error("OPENROUTER_API_KEY is not set");
+    throw new Error(
+      "OPENROUTER_API_KEY is not set. " +
+      "Get a free key at https://openrouter.ai/settings/keys — free-tier models cost $0."
+    );
   }
   return new OpenAI({
-    // FIXED: Cleaned up the broken string syntax and duplicate token duplication
     baseURL: "https://openrouter.ai/api/v1",
     apiKey: process.env.OPENROUTER_API_KEY,
     defaultHeaders: {
-      "HTTP-Referer": "https://localhost:3000",
-      "X-Title": "Guaranteed Free Router App",
-      // CRITICAL FOR SPEED: Lowers generation latency drastically
-      "openrouter/provider-routing": "nitro"
-    }
+      // Recommended by OpenRouter for free-tier usage
+      "HTTP-Referer": process.env.SITE_URL ?? "http://localhost",
+      "X-Title": process.env.SITE_NAME ?? "My App",
+    },
   });
 }
 
-// Strict schema validation that completely blocks outside model overrides
 const MessageSchema = z.object({
   role: z.enum(["system", "user", "assistant"]),
   content: z.string(),
@@ -33,9 +34,9 @@ const MessageSchema = z.object({
 
 const ChatSchema = z.object({
   messages: z.array(MessageSchema).min(1),
-  // Hardcoded literal: This endpoint rejects any incoming request trying to specify a paid model
-  model: z.literal("openrouter/free").default("openrouter/free"),
-  max_tokens: z.number().int().positive().max(4096).default(4096),
+  // Default to a free model; callers may pass any ":free" model from OpenRouter
+  model: z.string().default(FREE_MODEL),
+  max_tokens: z.number().int().positive().max(8192).default(8192),
   temperature: z.number().min(0).max(2).default(1),
 });
 
@@ -44,70 +45,25 @@ app.get("/api/healthz", (_req, res) => {
   res.json({ status: "ok" });
 });
 
-// Simple GET — Pass message as ?q=
+// Simple GET — pass your message as ?q=
+// curl "https://your-project.replit.app/api/ask?q=hello+how+are+you"
 app.get("/api/ask", async (req, res) => {
   const q = req.query.q;
   if (!q || typeof q !== "string") {
-    return res.status(400).json({ error: "Missing ?q= parameter." });
+    return res.status(400).json({ error: "Missing ?q= parameter. Example: /api/ask?q=hello" });
   }
+
+  const model = (typeof req.query.model === "string" && req.query.model) || FREE_MODEL;
+
   try {
     const client = getClient();
-    // FORCE FREE MODEL: Completely ignored req.query.model to prevent unintended paid calls
     const completion = await client.chat.completions.create({
-      model: "openrouter/free",
+      model,
       messages: [{ role: "user", content: q }],
-      max_tokens: 4096,
+      max_tokens: 8192,
     });
-    
-    const content = completion.choices?.[0]?.message?.content ?? "";
+    const content = completion.choices[0]?.message?.content ?? "";
     const usage = completion.usage;
-    
-    res.json({
-      content,
-      model: completion.model, // Confirms the exact free fallback engine chosen
-      usage: {
-        prompt_tokens: usage?.prompt_tokens ?? 0,
-        completion_tokens: usage?.completion_tokens ?? 0,
-        total_tokens: usage?.total_tokens ?? 0,
-      },
-    });
-  } catch (err) {
-    res.status(502).json({ error: "OpenRouter request failed", message: err instanceof Error ? err.message : String(err) });
-  }
-});
-
-// List all OpenRouter models
-app.get("/api/models", async (_req, res) => {
-  try {
-    const response = await fetch("https://openrouter.ai/api/v1/models", {
-      headers: { Authorization: `Bearer ${process.env.OPENROUTER_API_KEY}` },
-    });
-    res.json(await response.json());
-  } catch (err) {
-    // FIXED: Handled arbitrary error safely instead of calling .message on unknown type
-    res.status(502).json({ error: err instanceof Error ? err.message : String(err) });
-  }
-});
-
-// Non-streaming chat (POST with hardlocked free constraint)
-app.post("/api/chat", async (req, res) => {
-  const parsed = ChatSchema.safeParse(req.body);
-  if (!parsed.success) {
-    return res.status(400).json({ error: "Invalid request. Only 'openrouter/free' is permitted.", details: parsed.error.flatten() });
-  }
-  const { messages, model, max_tokens, temperature } = parsed.data;
-  try {
-    const client = getClient();
-    const completion = await client.chat.completions.create({
-      model, // Will always evaluate exactly to "openrouter/free"
-      messages,
-      max_tokens,
-      temperature,
-    });
-    
-    const content = completion.choices?.[0]?.message?.content ?? "";
-    const usage = completion.usage;
-    
     res.json({
       content,
       model: completion.model,
@@ -118,7 +74,120 @@ app.post("/api/chat", async (req, res) => {
       },
     });
   } catch (err) {
-    res.status(502).json({ error: "OpenRouter request failed", message: err instanceof Error ? err.message : String(err) });
+    res.status(502).json({ error: "OpenRouter request failed", message: err.message });
+  }
+});
+
+// List free OpenRouter models only
+app.get("/api/models", async (_req, res) => {
+  try {
+    const response = await fetch("https://openrouter.ai/api/v1/models", {
+      headers: { Authorization: `Bearer ${process.env.OPENROUTER_API_KEY ?? ""}` },
+    });
+    const data = await response.json();
+    // Filter to free models (pricing.prompt === "0" or id ends with ":free")
+    const freeModels = data?.data?.filter(
+      (m) => m.id?.endsWith(":free") || (m.pricing?.prompt === "0" && m.pricing?.completion === "0")
+    ) ?? [];
+    res.json({ data: freeModels, total: freeModels.length });
+  } catch (err) {
+    res.status(502).json({ error: err.message });
+  }
+});
+
+// /openrouter/free — always uses a free model, no model selection needed
+// GET:  /api/openrouter/free?q=your+question
+// POST: /api/openrouter/free  { "messages": [...], "max_tokens": 8192, "temperature": 1 }
+
+const FreeOnlySchema = z.object({
+  messages: z.array(MessageSchema).min(1),
+  max_tokens: z.number().int().positive().max(8192).default(8192),
+  temperature: z.number().min(0).max(2).default(1),
+});
+
+app.get("/api/openrouter/free", async (req, res) => {
+  const q = req.query.q;
+  if (!q || typeof q !== "string") {
+    return res.status(400).json({ error: "Missing ?q= parameter. Example: /api/openrouter/free?q=hello" });
+  }
+  try {
+    const client = getClient();
+    const completion = await client.chat.completions.create({
+      model: FREE_MODEL,
+      messages: [{ role: "user", content: q }],
+      max_tokens: 8192,
+    });
+    const content = completion.choices[0]?.message?.content ?? "";
+    const usage = completion.usage;
+    res.json({
+      content,
+      model: completion.model,
+      usage: {
+        prompt_tokens: usage?.prompt_tokens ?? 0,
+        completion_tokens: usage?.completion_tokens ?? 0,
+        total_tokens: usage?.total_tokens ?? 0,
+      },
+    });
+  } catch (err) {
+    res.status(502).json({ error: "OpenRouter request failed", message: err.message });
+  }
+});
+
+app.post("/api/openrouter/free", async (req, res) => {
+  const parsed = FreeOnlySchema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({ error: "Invalid request", details: parsed.error.flatten() });
+  }
+  const { messages, max_tokens, temperature } = parsed.data;
+  try {
+    const client = getClient();
+    const completion = await client.chat.completions.create({
+      model: FREE_MODEL,
+      messages,
+      max_tokens,
+      temperature,
+    });
+    const content = completion.choices[0]?.message?.content ?? "";
+    const usage = completion.usage;
+    res.json({
+      content,
+      model: completion.model,
+      usage: {
+        prompt_tokens: usage?.prompt_tokens ?? 0,
+        completion_tokens: usage?.completion_tokens ?? 0,
+        total_tokens: usage?.total_tokens ?? 0,
+      },
+    });
+  } catch (err) {
+    res.status(502).json({ error: "OpenRouter request failed", message: err.message });
+  }
+});
+
+// Non-streaming chat (POST with full control)
+app.post("/api/chat", async (req, res) => {
+  const parsed = ChatSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({ error: "Invalid request", details: parsed.error.flatten() });
+  }
+
+  const { messages, model, max_tokens, temperature } = parsed.data;
+
+  try {
+    const client = getClient();
+    const completion = await client.chat.completions.create({ model, messages, max_tokens, temperature });
+    const content = completion.choices[0]?.message?.content ?? "";
+    const usage = completion.usage;
+    res.json({
+      content,
+      model: completion.model,
+      usage: {
+        prompt_tokens: usage?.prompt_tokens ?? 0,
+        completion_tokens: usage?.completion_tokens ?? 0,
+        total_tokens: usage?.total_tokens ?? 0,
+      },
+    });
+  } catch (err) {
+    res.status(502).json({ error: "OpenRouter request failed", message: err.message });
   }
 });
 
@@ -126,36 +195,28 @@ app.post("/api/chat", async (req, res) => {
 app.post("/api/chat/stream", async (req, res) => {
   const parsed = ChatSchema.safeParse(req.body);
   if (!parsed.success) {
-    return res.status(400).json({ error: "Invalid request. Only 'openrouter/free' is permitted.", details: parsed.error.flatten() });
+    return res.status(400).json({ error: "Invalid request", details: parsed.error.flatten() });
   }
+
   const { messages, model, max_tokens, temperature } = parsed.data;
-  
+
   res.setHeader("Content-Type", "text/event-stream");
   res.setHeader("Cache-Control", "no-cache");
   res.setHeader("Connection", "keep-alive");
   res.setHeader("X-Accel-Buffering", "no");
   res.flushHeaders();
-  
+
   try {
     const client = getClient();
-    const stream = await client.chat.completions.create({
-      model,
-      messages,
-      max_tokens,
-      temperature,
-      stream: true,
-    });
-    
+    const stream = await client.chat.completions.create({ model, messages, max_tokens, temperature, stream: true });
     for await (const chunk of stream) {
-      const content = chunk.choices?.[0]?.delta?.content;
+      const content = chunk.choices[0]?.delta?.content;
       if (content) res.write(`data: ${JSON.stringify({ content })}\n\n`);
     }
     res.write(`data: ${JSON.stringify({ done: true })}\n\n`);
     res.end();
   } catch (err) {
-    // FIXED: Safeguarded err.message evaluation against type 'unknown'
-    const errMsg = err instanceof Error ? err.message : String(err);
-    res.write(`data: ${JSON.stringify({ error: errMsg })}\n\n`);
+    res.write(`data: ${JSON.stringify({ error: err.message })}\n\n`);
     res.end();
   }
 });
