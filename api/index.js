@@ -14,7 +14,7 @@ function getClient() {
   }
   return new OpenAI({
     // FIXED: Restored /api/v1 so OpenRouter accepts OpenAI SDK routing structures
-    baseURL: "https://openrouter.ai",
+    baseURL: "baseURL: "https://openrouter.ai/api/v1",
     apiKey: process.env.OPENROUTER_API_KEY,
     defaultHeaders: {
       "HTTP-Referer": "https://localhost:3000", 
@@ -74,7 +74,7 @@ app.get("/api/ask", async (req, res) => {
       },
     });
   } catch (err) {
-    res.status(502).json({ error: "OpenRouter request failed", message: err.message });
+    res.status(502).json({ error: "OpenRouter request failed", message: err instanceof Error ? err.message : String(err) });
   }
 });
 
@@ -82,7 +82,7 @@ app.get("/api/ask", async (req, res) => {
 app.get("/api/models", async (_req, res) => {
   try {
     // FIXED: Restored the complete API path for models endpoint parsing
-    const response = await fetch("https://openrouter.ai/models", {
+    const response = await fetch("https://openrouter.ai/api/v1/models", {
       headers: { Authorization: `Bearer ${process.env.OPENROUTER_API_KEY}` },
     });
     res.json(await response.json());
@@ -122,7 +122,7 @@ app.post("/api/chat", async (req, res) => {
       },
     });
   } catch (err) {
-    res.status(502).json({ error: "OpenRouter request failed", message: err.message });
+    res.status(502).json({ error: "OpenRouter request failed", message: err instanceof Error ? err.message : String(err) });
   }
 });
 
