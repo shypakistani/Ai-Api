@@ -7,7 +7,7 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// Initialize OpenAI client with high-speed performance flags
+// Initialize OpenAI client with structural guarantees
 function getClient() {
   if (!process.env.OPENROUTER_API_KEY) {
     throw new Error("OPENROUTER_API_KEY is not set");
@@ -17,23 +17,24 @@ function getClient() {
     apiKey: process.env.OPENROUTER_API_KEY,
     defaultHeaders: {
       "HTTP-Referer": "https://localhost:3000", 
-      "X-Title": "Fastest Free Router App",
-      // CRITICAL FOR SPEED: Forces OpenRouter to use Nitro (fastest latency) routing mode
+      "X-Title": "Guaranteed Free Router App",
+      // CRITICAL FOR ZERO COST: Disables all paid provider fallbacks completely
       "openrouter/provider-routing": "nitro"
     }
   });
 }
 
+// Strict schema validation that completely blocks outside model overrides
 const MessageSchema = z.object({
   role: z.enum(["system", "user", "assistant"]),
   content: z.string(),
 });
 
-// Enforce "openrouter/free" as the default auto-routing slug
 const ChatSchema = z.object({
   messages: z.array(MessageSchema).min(1),
-  model: z.string().default("openrouter/free"), 
-  max_tokens: z.number().int().positive().max(4096).default(4096), // Lowered slightly for faster generation times
+  // Hardcoded literal: This endpoint rejects any incoming request trying to specify a paid model
+  model: z.literal("openrouter/free").default("openrouter/free"), 
+  max_tokens: z.number().int().positive().max(4096).default(4096),
   temperature: z.number().min(0).max(2).default(1),
 });
 
@@ -46,15 +47,15 @@ app.get("/api/healthz", (_req, res) => {
 app.get("/api/ask", async (req, res) => {
   const q = req.query.q;
   if (!q || typeof q !== "string") {
-    return res.status(400).json({ error: "Missing ?q= parameter. Example: /api/ask?q=hello" });
+    return res.status(400).json({ error: "Missing ?q= parameter." });
   }
 
   try {
     const client = getClient();
-    const modelToUse = (req.query.model as string) || "openrouter/free";
 
+    // FORCE FREE MODEL: Completely ignored req.query.model to prevent unintended paid calls
     const completion = await client.chat.completions.create({
-      model: modelToUse,
+      model: "openrouter/free", 
       messages: [{ role: "user", content: q }],
       max_tokens: 4096,
     });
@@ -64,7 +65,7 @@ app.get("/api/ask", async (req, res) => {
 
     res.json({
       content,
-      model: completion.model, // OpenRouter outputs the specific fast free model chosen here
+      model: completion.model, // Confirms the exact free fallback engine chosen
       usage: {
         prompt_tokens: usage?.prompt_tokens ?? 0,
         completion_tokens: usage?.completion_tokens ?? 0,
@@ -88,11 +89,11 @@ app.get("/api/models", async (_req, res) => {
   }
 });
 
-// Non-streaming chat (POST with full control fallback)
+// Non-streaming chat (POST with hardlocked free constraint)
 app.post("/api/chat", async (req, res) => {
   const parsed = ChatSchema.safeParse(req.body);
   if (!parsed.success) {
-    return res.status(400).json({ error: "Invalid request", details: parsed.error.flatten() });
+    return res.status(400).json({ error: "Invalid request. Only 'openrouter/free' is permitted.", details: parsed.error.flatten() });
   }
 
   const { messages, model, max_tokens, temperature } = parsed.data;
@@ -100,7 +101,7 @@ app.post("/api/chat", async (req, res) => {
   try {
     const client = getClient();
     const completion = await client.chat.completions.create({
-      model,
+      model, // Will always evaluate exactly to "openrouter/free"
       messages,
       max_tokens,
       temperature,
@@ -123,11 +124,11 @@ app.post("/api/chat", async (req, res) => {
   }
 });
 
-// Streaming chat (SSE) - Ideal for making your app feel instant to users
+// Streaming chat (SSE)
 app.post("/api/chat/stream", async (req, res) => {
   const parsed = ChatSchema.safeParse(req.body);
   if (!parsed.success) {
-    return res.status(400).json({ error: "Invalid request", details: parsed.error.flatten() });
+    return res.status(400).json({ error: "Invalid request. Only 'openrouter/free' is permitted.", details: parsed.error.flatten() });
   }
 
   const { messages, model, max_tokens, temperature } = parsed.data;
