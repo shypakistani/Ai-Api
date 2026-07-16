@@ -7,11 +7,18 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// Fast, reliable free model on OpenRouter. Switch to any ":free" model you prefer.
-// llama-3.1-8b is one of the fastest free options available.
-const FREE_MODEL = "meta-llama/llama-3.2-3b-instruct:free";
+// Ordered by speed. If the first model returns 429 (provider overloaded),
+// the request automatically falls through to the next one.
+const FREE_MODELS = [
+  "meta-llama/llama-3.2-3b-instruct:free",
+  "meta-llama/llama-3.1-8b-instruct:free",
+  "mistralai/mistral-7b-instruct:free",
+  "google/gemma-2-9b-it:free",
+  "qwen/qwen-2.5-7b-instruct:free",
+];
+const FREE_MODEL = FREE_MODELS[0];
 
-// Singleton client — created once, reused on every request (saves ~5–10 ms per call)
+// Singleton client — created once, reused on every request
 let _client = null;
 function getClient() {
   if (_client) return _client;
@@ -32,6 +39,37 @@ function getClient() {
   return _client;
 }
 
+// Calls OpenRouter with automatic fallback through FREE_MODELS on 429/503.
+// For non-free models (user-specified), no fallback is attempted.
+async function chatWithFallback({ model, messages, max_tokens, temperature = 1, stream = false }) {
+  const client = getClient();
+  const isFreeModel = FREE_MODELS.includes(model);
+  const candidates = isFreeModel ? FREE_MODELS : [model];
+
+  let lastErr;
+  for (const candidate of candidates) {
+    try {
+      const completion = await client.chat.completions.create({
+        model: candidate,
+        messages,
+        max_tokens,
+        temperature,
+        stream,
+      });
+      return { completion, model: candidate };
+    } catch (err) {
+      const status = err?.status ?? err?.response?.status;
+      // 429 = rate limited, 503 = provider unavailable — retry next model
+      if (isFreeModel && (status === 429 || status === 503)) {
+        lastErr = err;
+        continue;
+      }
+      throw err; // non-retriable error — surface immediately
+    }
+  }
+  throw lastErr; // all candidates exhausted
+}
+
 const MessageSchema = z.object({
   role: z.enum(["system", "user", "assistant"]),
   content: z.string(),
@@ -40,9 +78,12 @@ const MessageSchema = z.object({
 const ChatSchema = z.object({
   messages: z.array(MessageSchema).min(1),
   model: z.string().default(FREE_MODEL),
-  // Lowered from 8192 → 1024. This is the single biggest speed lever:
-  // the model stops as soon as it's done, but a high cap forces the API
-  // to reserve time/compute for up to that many tokens.
+  max_tokens: z.number().int().positive().max(8192).default(1024),
+  temperature: z.number().min(0).max(2).default(1),
+});
+
+const FreeOnlySchema = z.object({
+  messages: z.array(MessageSchema).min(1),
   max_tokens: z.number().int().positive().max(8192).default(1024),
   temperature: z.number().min(0).max(2).default(1),
 });
@@ -52,24 +93,17 @@ app.get("/api/healthz", (_req, res) => {
   res.json({ status: "ok" });
 });
 
-// Simple GET — pass your message as ?q=
-// curl "https://your-project.replit.app/api/ask?q=hello+how+are+you"
+// Simple GET — /api/ask?q=your+question
 app.get("/api/ask", async (req, res) => {
   const q = req.query.q;
   if (!q || typeof q !== "string") {
     return res.status(400).json({ error: "Missing ?q= parameter. Example: /api/ask?q=hello" });
   }
-
   const model = (typeof req.query.model === "string" && req.query.model) || FREE_MODEL;
   const max_tokens = parseInt(req.query.max_tokens) || 1024;
 
   try {
-    const client = getClient();
-    const completion = await client.chat.completions.create({
-      model,
-      messages: [{ role: "user", content: q }],
-      max_tokens,
-    });
+    const { completion } = await chatWithFallback({ model, messages: [{ role: "user", content: q }], max_tokens });
     const content = completion.choices[0]?.message?.content ?? "";
     const usage = completion.usage;
     res.json({
@@ -102,16 +136,7 @@ app.get("/api/models", async (_req, res) => {
   }
 });
 
-// /api/openrouter/free — always uses the fast free model
-// GET:  /api/openrouter/free?q=your+question
-// POST: /api/openrouter/free  { "messages": [...], "max_tokens": 1024, "temperature": 1 }
-
-const FreeOnlySchema = z.object({
-  messages: z.array(MessageSchema).min(1),
-  max_tokens: z.number().int().positive().max(8192).default(1024),
-  temperature: z.number().min(0).max(2).default(1),
-});
-
+// GET /api/openrouter/free?q=your+question
 app.get("/api/openrouter/free", async (req, res) => {
   const q = req.query.q;
   if (!q || typeof q !== "string") {
@@ -119,12 +144,7 @@ app.get("/api/openrouter/free", async (req, res) => {
   }
   const max_tokens = parseInt(req.query.max_tokens) || 1024;
   try {
-    const client = getClient();
-    const completion = await client.chat.completions.create({
-      model: FREE_MODEL,
-      messages: [{ role: "user", content: q }],
-      max_tokens,
-    });
+    const { completion } = await chatWithFallback({ model: FREE_MODEL, messages: [{ role: "user", content: q }], max_tokens });
     const content = completion.choices[0]?.message?.content ?? "";
     const usage = completion.usage;
     res.json({
@@ -141,6 +161,7 @@ app.get("/api/openrouter/free", async (req, res) => {
   }
 });
 
+// POST /api/openrouter/free
 app.post("/api/openrouter/free", async (req, res) => {
   const parsed = FreeOnlySchema.safeParse(req.body);
   if (!parsed.success) {
@@ -148,13 +169,7 @@ app.post("/api/openrouter/free", async (req, res) => {
   }
   const { messages, max_tokens, temperature } = parsed.data;
   try {
-    const client = getClient();
-    const completion = await client.chat.completions.create({
-      model: FREE_MODEL,
-      messages,
-      max_tokens,
-      temperature,
-    });
+    const { completion } = await chatWithFallback({ model: FREE_MODEL, messages, max_tokens, temperature });
     const content = completion.choices[0]?.message?.content ?? "";
     const usage = completion.usage;
     res.json({
@@ -171,18 +186,15 @@ app.post("/api/openrouter/free", async (req, res) => {
   }
 });
 
-// Non-streaming chat (POST with full control)
+// POST /api/chat — full control, non-streaming
 app.post("/api/chat", async (req, res) => {
   const parsed = ChatSchema.safeParse(req.body);
   if (!parsed.success) {
     return res.status(400).json({ error: "Invalid request", details: parsed.error.flatten() });
   }
-
   const { messages, model, max_tokens, temperature } = parsed.data;
-
   try {
-    const client = getClient();
-    const completion = await client.chat.completions.create({ model, messages, max_tokens, temperature });
+    const { completion } = await chatWithFallback({ model, messages, max_tokens, temperature });
     const content = completion.choices[0]?.message?.content ?? "";
     const usage = completion.usage;
     res.json({
@@ -199,13 +211,12 @@ app.post("/api/chat", async (req, res) => {
   }
 });
 
-// Streaming chat (SSE) — fastest perceived response since tokens arrive immediately
+// POST /api/chat/stream — SSE streaming (fastest perceived latency)
 app.post("/api/chat/stream", async (req, res) => {
   const parsed = ChatSchema.safeParse(req.body);
   if (!parsed.success) {
     return res.status(400).json({ error: "Invalid request", details: parsed.error.flatten() });
   }
-
   const { messages, model, max_tokens, temperature } = parsed.data;
 
   res.setHeader("Content-Type", "text/event-stream");
@@ -214,17 +225,37 @@ app.post("/api/chat/stream", async (req, res) => {
   res.setHeader("X-Accel-Buffering", "no");
   res.flushHeaders();
 
-  try {
-    const client = getClient();
-    const stream = await client.chat.completions.create({ model, messages, max_tokens, temperature, stream: true });
-    for await (const chunk of stream) {
-      const content = chunk.choices[0]?.delta?.content;
-      if (content) res.write(`data: ${JSON.stringify({ content })}\n\n`);
+  // For streaming, try each candidate manually (stream=true can't be auto-retried mid-stream)
+  const candidates = FREE_MODELS.includes(model) ? FREE_MODELS : [model];
+  let streamed = false;
+  for (const candidate of candidates) {
+    try {
+      const client = getClient();
+      const stream = await client.chat.completions.create({
+        model: candidate,
+        messages,
+        max_tokens,
+        temperature,
+        stream: true,
+      });
+      for await (const chunk of stream) {
+        const content = chunk.choices[0]?.delta?.content;
+        if (content) res.write(`data: ${JSON.stringify({ content })}\n\n`);
+      }
+      res.write(`data: ${JSON.stringify({ done: true })}\n\n`);
+      res.end();
+      streamed = true;
+      break;
+    } catch (err) {
+      const status = err?.status ?? err?.response?.status;
+      if (FREE_MODELS.includes(model) && (status === 429 || status === 503)) continue;
+      res.write(`data: ${JSON.stringify({ error: err.message })}\n\n`);
+      res.end();
+      return;
     }
-    res.write(`data: ${JSON.stringify({ done: true })}\n\n`);
-    res.end();
-  } catch (err) {
-    res.write(`data: ${JSON.stringify({ error: err.message })}\n\n`);
+  }
+  if (!streamed) {
+    res.write(`data: ${JSON.stringify({ error: "All free models are currently rate-limited. Try again in a moment." })}\n\n`);
     res.end();
   }
 });
