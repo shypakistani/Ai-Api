@@ -9,7 +9,7 @@ app.use(express.json());
 
 // Fast, reliable free model on OpenRouter. Switch to any ":free" model you prefer.
 // llama-3.1-8b is one of the fastest free options available.
-const FREE_MODEL = "meta-llama/llama-3.1-8b-instruct:free";
+const FREE_MODEL = "meta-llama/llama-3.2-3b-instruct:free";
 
 // Singleton client — created once, reused on every request (saves ~5–10 ms per call)
 let _client = null;
